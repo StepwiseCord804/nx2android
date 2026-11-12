@@ -485,6 +485,70 @@ static uint32_t *spv_frag_depth(const uint32_t *w, uint32_t nw, uint32_t *onw) {
         memcpy(&o[no], &w[i], n * 4); no += n; i += n; }
     o[3] = c.bound; *onw = no; free(c.nt); return o;
 }
+// A variant of a fragment shader for alpha to coverage on a single-sample target (gfx_vk_exec.c pkey a2c 2): before each return of its entry point the fragment is
+// discarded when the alpha of its output at location 0 is under a 4x4 ordered-dither threshold at gl_FragCoord. The Switch's GPU dithers one sample's coverage that
+// way; Adreno keeps or drops the whole fragment at one alpha, so an object the game fades out with it vanished at once (Breath of the Wild: Link in a teleport).
+// NULL when the shader has no vec4 output at location 0 or the module is not as expected
+static uint32_t *spv_a2c_dither(const uint32_t *w, uint32_t nw, uint32_t *onw) {
+    spvi c = {.w = w, .fn = nw, .bound = w[3]};
+    uint32_t ep = 0, epfn = 0, firsttype = 0, coord = 0, out0 = 0, bound = w[3]; uint8_t *loc0 = calloc(bound, 1);
+    for (uint32_t i = 5; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n || i + n > nw) { free(loc0); return NULL; }
+        if (op == 15) { if (ep || n < 3 || w[i + 1] != 4) { free(loc0); return NULL; } ep = i; epfn = w[i + 2]; }   // one entry point, a Fragment one
+        if (op == 71 && n >= 4 && w[i + 2] == 11 && w[i + 3] == 15) coord = w[i + 1];   // BuiltIn FragCoord
+        if (op == 71 && n == 4 && w[i + 2] == 30 && w[i + 3] == 0 && w[i + 1] < bound) loc0[w[i + 1]] |= 1;   // Location 0
+        if (op == 71 && n == 4 && w[i + 2] == 32 && w[i + 3] && w[i + 1] < bound) loc0[w[i + 1]] |= 2;   // Index 1: the second blend source, not the colour
+        if (!firsttype && ((op >= 19 && op <= 39) || (op >= 41 && op <= 52) || op == 59)) firsttype = i;   // the first type, constant or variable: the annotations end here
+        if (op == 54) { c.fn = i; break; }   // the first OpFunction
+        i += n; }
+    if (!ep || !firsttype || c.fn == nw) { free(loc0); return NULL; }
+    c.nt = malloc(4096 * 4);
+    uint32_t o32[1] = {32}; uint32_t f32 = spvi_decl(&c, 22, o32, 1, 1), u32 = spvi_scalar(&c, 1), tbool = spvi_decl(&c, 20, o32, 0, 1);
+    uint32_t ov4[2] = {f32, 4}; uint32_t v4 = spvi_decl(&c, 23, ov4, 2, 1);
+    uint32_t op1[2] = {1, v4}, op2[2] = {1, f32}, op3[2] = {3, f32}, op4[2] = {3, v4};
+    uint32_t pin4 = spvi_decl(&c, 32, op1, 2, 1), pinf = spvi_decl(&c, 32, op2, 2, 1), poutf = spvi_decl(&c, 32, op3, 2, 1), pout4 = spvi_find(w, 5, c.fn, 32, op4, 2);
+    for (uint32_t i = 5; pout4 && i < c.fn;) { uint32_t n = w[i] >> 16;   // the output: an OpVariable of pointer-to-Output-vec4 type at location 0
+        if ((w[i] & 0xffff) == 59 && n >= 4 && w[i + 1] == pout4 && w[i + 3] == 3 && w[i + 2] < bound && loc0[w[i + 2]] == 1) out0 = w[i + 2];
+        i += n; }
+    free(loc0);
+    if (!f32 || !u32 || !tbool || !v4 || !pin4 || !pinf || !poutf || !out0 || c.nnt + 64 > 4096) { free(c.nt); return NULL; }
+    uint32_t cu[4], cf[2]; static const float F[2] = {1.0f / 16, 0.5f / 16};
+    for (uint32_t k = 0; k < 4; k++) { cu[k] = c.bound++; c.nt[c.nnt++] = 4u << 16 | 43; c.nt[c.nnt++] = u32; c.nt[c.nnt++] = cu[k]; c.nt[c.nnt++] = k; }   // OpConstant uint 0..3
+    for (uint32_t k = 0; k < 2; k++) { cf[k] = c.bound++; c.nt[c.nnt++] = 4u << 16 | 43; c.nt[c.nnt++] = f32; c.nt[c.nnt++] = cf[k]; memcpy(&c.nt[c.nnt++], &F[k], 4); }
+    int newcoord = !coord; if (newcoord) { coord = c.bound++; c.nt[c.nnt++] = 4u << 16 | 59; c.nt[c.nnt++] = pin4; c.nt[c.nnt++] = coord; c.nt[c.nnt++] = 1; }   // OpVariable Input
+    uint32_t nret = 0; for (uint32_t i = c.fn; i < nw;) { uint32_t n = w[i] >> 16; if (!n) { free(c.nt); return NULL; } nret += (w[i] & 0xffff) == 253; i += n; }
+    enum { PER = 128 };   // words added a return, at most
+    uint32_t *o = malloc(((size_t)nw + c.nnt + 16 + PER * nret) * 4), no = 5; memcpy(o, w, 20);
+    for (uint32_t i = 5; i < c.fn;) { uint32_t n = w[i] >> 16;
+        if (i == firsttype && newcoord) { o[no++] = 4u << 16 | 71; o[no++] = coord; o[no++] = 11; o[no++] = 15; }   // BuiltIn FragCoord
+        if (i == ep && newcoord) { o[no++] = (n + 1) << 16 | 15; memcpy(&o[no], &w[i + 1], (n - 1) * 4); no += n - 1; o[no++] = coord; }   // the entry point lists it
+        else { memcpy(&o[no], &w[i], n * 4); no += n; }
+        i += n; }
+    memcpy(&o[no], c.nt, c.nnt * 4); no += c.nnt;
+    int in_ep = 0;
+    for (uint32_t i = c.fn; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == 54) in_ep = w[i + 2] == epfn; else if (op == 56) in_ep = 0;   // OpFunction / OpFunctionEnd
+        if (op == 253 && in_ep) {
+            uint32_t b = c.bound; c.bound += 28;
+            // the threshold: x and y of the pixel, their low two bits interleaved into the 4x4 Bayer index (t = x ^ y: bit 0 of t, bit 0 of y, bit 1 of t, bit 1 of y)
+            uint32_t x[] = {
+                5u << 16 | 65, pinf, b + 0, coord, cu[0],  4u << 16 | 61, f32, b + 1, b + 0,  4u << 16 | 109, u32, b + 2, b + 1,   // x: AccessChain, Load, ConvertFToU
+                5u << 16 | 65, pinf, b + 3, coord, cu[1],  4u << 16 | 61, f32, b + 4, b + 3,  4u << 16 | 109, u32, b + 5, b + 4,   // y
+                5u << 16 | 198, u32, b + 6, b + 2, b + 5,                                                                          // t = x ^ y
+                5u << 16 | 199, u32, b + 7, b + 6, cu[1],  5u << 16 | 196, u32, b + 8, b + 7, cu[3],                               // (t & 1) << 3
+                5u << 16 | 199, u32, b + 9, b + 5, cu[1],  5u << 16 | 196, u32, b + 10, b + 9, cu[2],                              // (y & 1) << 2
+                5u << 16 | 199, u32, b + 11, b + 6, cu[2],                                                                         // t & 2
+                5u << 16 | 194, u32, b + 12, b + 5, cu[1], 5u << 16 | 199, u32, b + 13, b + 12, cu[1],                             // y >> 1 & 1
+                5u << 16 | 197, u32, b + 14, b + 8, b + 10, 5u << 16 | 197, u32, b + 15, b + 11, b + 13, 5u << 16 | 197, u32, b + 16, b + 14, b + 15,   // the index, 0..15
+                4u << 16 | 112, f32, b + 17, b + 16,  5u << 16 | 133, f32, b + 18, b + 17, cf[0],  5u << 16 | 129, f32, b + 19, b + 18, cf[1],          // (index + 0.5) / 16
+                5u << 16 | 65, poutf, b + 20, out0, cu[3],  4u << 16 | 61, f32, b + 21, b + 20,                                    // the output's alpha
+                5u << 16 | 184, tbool, b + 22, b + 21, b + 19,                                                                     // FOrdLessThan
+                3u << 16 | 247, b + 24, 0,  4u << 16 | 250, b + 22, b + 23, b + 24,                                                // SelectionMerge, BranchConditional
+                2u << 16 | 248, b + 23,  1u << 16 | 252,  2u << 16 | 248, b + 24};                                                 // Label, Kill, Label: the return goes on from here
+            _Static_assert(sizeof x / 4 <= PER, "words added a return");
+            memcpy(&o[no], x, sizeof x); no += sizeof x / 4; }
+        memcpy(&o[no], &w[i], n * 4); no += n; i += n; }
+    o[3] = c.bound; *onw = no; free(c.nt); return o;
+}
 // DM_VK_SPV_DIR=<dir> with DM_VK_SPV_ALT=1 (live, debugging): pipelines made while it is on use <dir>/<key>.spv in place of the bundle's code where the file
 // exists (same bindings), so two compilations of a shader can be compared in one run: the translator's module through spirv-opt, its GLSL through glslc...
 static VkShaderModule alt_module(vkshader_t *s) {
@@ -519,16 +583,17 @@ static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im,
 VkShaderModule vk_shader_module(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd) { extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);
     VkShaderModule m = vk_shader_module_(s, um, im, xo, fd); if (g_prof_on) { clock_gettime(CLOCK_MONOTONIC, &b); g_prof_ns[3] += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); } return m; }
 static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd) {
-    int dual = fd >> 1 & 1; fd &= 1;   // fd bit 1: the dual-source variant
+    int dual = fd >> 1 & 1, a2d = fd >> 2 & 1; fd &= 1;   // fd bit 1: the dual-source variant; bit 2: alpha to coverage as a dither (spv_a2c_dither)
     if (fd && (s->stage != 1 || s->depth_repl)) fd = 0;
     if (dual && s->stage != 1) dual = 0;
-    if (!(um | im | xo | (uint32_t)fd | (uint32_t)dual) || !s->spv) return s->mod;
+    if (a2d && s->stage != 1) a2d = 0;
+    if (!(um | im | xo | (uint32_t)fd | (uint32_t)dual | (uint32_t)a2d) || !s->spv) return s->mod;
     if (xo == 1u << 31) {   // DM_VK_SPV_ALT
         pthread_mutex_lock(&g_sh_mu); for (int i = 0; i < s->nvar; i++) if (s->var[i].um == 0 && s->var[i].im == 0 && s->var[i].xo == xo) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
         VkShaderModule m = alt_module(s); if (s->nvar < 8) s->var[s->nvar++] = (typeof(s->var[0])){0, 0, xo, 0, m}; pthread_mutex_unlock(&g_sh_mu); return m; }
     xo &= ~(1u << 31);
     pthread_mutex_lock(&g_sh_mu);
-    for (int i = 0; i < s->nvar; i++) if (s->var[i].um == um && s->var[i].im == im && s->var[i].xo == xo && s->var[i].fd == (fd | dual << 1)) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
+    for (int i = 0; i < s->nvar; i++) if (s->var[i].um == um && s->var[i].im == im && s->var[i].xo == xo && s->var[i].fd == (fd | dual << 1 | a2d << 2)) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
     uint16_t bind[64]; uint8_t kind[64]; int nb = 0;
     for (int i = 0; i < s->nbind && i < 64; i++) if ((um | im) >> i & 1) { bind[nb] = s->b[i].binding; kind[nb++] = um >> i & 1 ? 1 : 2; }
     uint32_t nw = s->nspv, *w = nb ? spv_int_images(s->spv, s->nspv, bind, kind, nb, &nw) : NULL; VkShaderModule m = s->mod;
@@ -536,12 +601,13 @@ static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im,
         if (w && s->stage == 0) { uint32_t n3 = 0, *w3 = spv_vs_init(w, nw, &n3); if (w3) { free(w); w = w3; nw = n3; } } }   // the added outputs start as (0, 0, 0, 1) too
     if (fd && (w || !(nb || xo))) { uint32_t n2 = 0, *w2 = spv_frag_depth(w ? w : s->spv, nw, &n2); free(w); w = w2; nw = n2; }
     if (dual && (w || !(nb || xo || fd))) { uint32_t n2 = 0, *w2 = spv_dual(w ? w : s->spv, nw, &n2); free(w); w = w2; nw = n2; }
+    if (a2d && (w || !(nb || xo || fd || dual))) { uint32_t n2 = 0, *w2 = spv_a2c_dither(w ? w : s->spv, nw, &n2); free(w); w = w2; nw = n2; }
     if (w) { VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, (size_t)nw * 4, w};
-        if (vkCreateShaderModule(V.dev, &ci, NULL, &m)) { m = s->mod; VKLOG("[RED] shader %016llx: its variant was refused (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual); }
-        else VKLOG("shader %016llx: variant for bindings %#llx (uint texels) %#llx (int texels), outputs added %#x, fragment depth written %d, dual source %d", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual);
+        if (vkCreateShaderModule(V.dev, &ci, NULL, &m)) { m = s->mod; VKLOG("[RED] shader %016llx: its variant was refused (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d, alpha to coverage dither %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual, a2d); }
+        else VKLOG("shader %016llx: variant for bindings %#llx (uint texels) %#llx (int texels), outputs added %#x, fragment depth written %d, dual source %d, alpha to coverage dither %d", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual, a2d);
         free(w); }
-    else VKLOG("[RED] shader %016llx: no variant could be made (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual);
-    if (s->nvar < 8) s->var[s->nvar++] = (typeof(s->var[0])){um, im, xo, fd | dual << 1, m};
+    else VKLOG("[RED] shader %016llx: no variant could be made (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d, alpha to coverage dither %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual, a2d);
+    if (s->nvar < 8) s->var[s->nvar++] = (typeof(s->var[0])){um, im, xo, fd | dual << 1 | a2d << 2, m};
     pthread_mutex_unlock(&g_sh_mu);
     return m;
 }
