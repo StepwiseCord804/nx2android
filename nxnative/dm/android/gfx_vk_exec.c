@@ -79,6 +79,7 @@ static inline uint64_t tick(void) {
 // DM_VK_X_NOBAR=1 no barrier before a pass, DM_VK_X_DEPTH=1 depth neither loaded nor stored, DM_VK_X_COLOR=1 colour not loaded unless cleared
 static int g_x_nobar, g_x_depth, g_x_color, g_x_cbdraws, g_x_tracepass = -1, g_sub_pass;   // DM_VK_TRACE_PASS=n: log every draw of the submission's pass n (once)
 static int g_x_listpasses;
+static int g_x_listdraws;   // DM_VK_LIST_DRAWS=1 (live): one line a draw for the next submission (pass, shaders, blending, depth and stencil state), then it clears itself
 uint64_t vk_replay_ns(void) { return g_vkst.ns_exec; }   // the replay time so far (gfx_vk_present.c: a frame's cost for the adaptive rate)
 // flicker experiments (DM_CTL env lines, read every submission): DM_VK_X_NOSETC no descriptor set reuse, DM_VK_X_NODRVC no driver segment reuse, DM_VK_X_LANDCUT deferred
 // uniform updates land at each cut, DM_VK_X_NOKEEP no pass kept for the same targets, DM_VK_X_NOSHC no shadow reuse
@@ -156,6 +157,9 @@ void vk_watch(const vkimg_t *im, const char *what) {
 static void x_read(void) { const char *c = getenv("DM_VK_CB_DRAWS"); g_x_cbdraws = c ? atoi(c) : 128; g_sub_pass = 0;
     const char *fy = getenv("DM_VK_FLIPY"); g_flipy = !(fy && !atoi(fy));   // on unless DM_VK_FLIPY=0
     if (g_x_listpasses) { g_x_listpasses = 0; setenv("DM_VK_TRACE_PASS", "-1", 1); }
+    { const char *ld = getenv("DM_VK_LIST_DRAWS");   // two frames taken a moment apart show what the game draws differently (an object it fades out), by shader key
+      if (g_x_listdraws) { g_x_listdraws = 0; setenv("DM_VK_LIST_DRAWS", "0", 1); VKLOG("--- draw list: end"); }
+      else if (ld && atoi(ld)) { g_x_listdraws = 1; VKLOG("--- draw list: the submission at present %llu", (unsigned long long)g_tex_frame); } }
     const char *tp = getenv("DM_VK_TRACE_PASS"); g_x_tracepass = tp ? atoi(tp) : -1;
     { const char *e = getenv("DM_VK_ORDER_KEEP"); g_order_keep = e ? atoi(e) != 0 : DM_GAME_ORDER_KEEP; g_order_pending = g_order_check = 0; }
     { static uint64_t until; static int done; const char *la = getenv("DM_VK_LIST_AT");   // DM_VK_LIST_AT=<present>: the pass list of every submission over two presents from there
@@ -1753,6 +1757,9 @@ static int prepare_draw(int prim, int indexed) {
     }
     g_pass_wmem |= shader_wmem(S.sh[0]) | shader_wmem(k.raster_discard ? NULL : S.sh[1]) | shader_wmem(S.sh[2]);
     uint64_t tdesc = tick() - t1d; g_vkst.ns_desc += tdesc; if (g_prof_on) g_prof_ns[5] += tdesc;
+    if (g_x_listdraws) VKLOG("d p%d %ux%u vs %016llx fs %016llx gs %016llx | col %u fmt %u %u samples %u a2c %u | blend %#x %x %x %u / %x %x %u mask %x %x | depth %u %u %u bias %u stencil %u | cull %u front %u topo %u discard %u fdz %u",
+                             g_sub_pass - 1, S.pass_w, S.pass_h, (unsigned long long)k.key[0], (unsigned long long)k.key[1], (unsigned long long)k.key[2], k.ncol, k.cfmt[0], k.cfmt[1], k.samples, k.a2c,
+                             k.blend_en, k.bl[0].src, k.bl[0].dst, k.bl[0].eq, k.bl[0].srca, k.bl[0].dsta, k.bl[0].eqa, k.wmask[0], k.wmask[1], k.dt, k.dw, k.df, k.bias_en, k.st, k.cull, k.front, k.topo, k.raster_discard, k.fdz);
     if (g_tracing) {
         VKLOG("  pipeline: topology %u restart %u discard %u cull %u front %u mode %u clamp %u bias %u; depth test %u write %u func %u stencil %u; attributes %u bindings %u; colour %u (format %u) samples %u a2c %u; blend enable %#x logic %u/%u; fragment depth variant %u (depth written by a shader at present %llu, now %llu)",
               k.topo, k.restart, k.raster_discard, k.cull, k.front, k.mode, k.depth_clamp, k.bias_en, k.dt, k.dw, k.df, k.st, k.nattr, k.nbind, k.ncol, k.cfmt[0], k.samples, k.a2c, k.blend_en, k.logic_en, k.logic_op,
