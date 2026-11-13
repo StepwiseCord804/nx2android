@@ -390,9 +390,47 @@ void vk_ubd_land(VkCommandBuffer cb); int vk_ubd_shadow(uint64_t a, uint64_t n, 
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; uint32_t w, h; VkFormat f; uint64_t fence; int pass; uint64_t present; } pdump_t;
 enum { PD_MAX = 96 };
 static pdump_t g_pd[PD_MAX]; static int g_npd, g_pd_state, g_pd_skip, g_pd_frames; static char g_pd_size[128], g_pd_from[32];   // state 0 off, 1 dumping this submission's passes, 2 waiting to write
+// DM_VK_LOG_FS: what a block-compressed image the GPU wrote holds. A game can make such a texture on the GPU, drawing its blocks through an uncompressed view
+// (Breath of the Wild's 32x32x32 BC4 noise, through RGBA16UI views: the shaders Link takes in a teleport discard on it, and he vanished at once). When the
+// logged shader samples one, every level is read back once, and each depth slice's blocks are summed up in the log: how many bytes are not zero, the range
+// of the first two bytes of each block (BC4's and BC5's end points), a hash. Blocks left empty read as one flat value
+typedef struct { vkimg_t *im; int tid; VkBuffer b; VkDeviceMemory m; uint8_t *p; uint64_t present; uint32_t bpb, bw, bh; VkDeviceSize off[16]; } texstat_t;
+static texstat_t g_ts[4]; static int g_nts, g_ts_want;
+static void texstat_note(vkimg_t *im, int tid) {   // (inside a pass: the copy waits for its end)
+    const vkfmt_t *f = vk_fmt(im->nvn_format); if (!f || !f->compressed || f->dec || !im->gpu_w || g_nts == 4 || im->samples > 1) return;
+    for (int i = 0; i < g_nts; i++) if (g_ts[i].im == im) return;
+    g_ts[g_nts++] = (texstat_t){.im = im, .tid = tid, .bpb = (uint32_t)f->bpb, .bw = f->bw ? f->bw : 4, .bh = f->bh ? f->bh : 4}; g_ts_want = 1;
+}
+static void texstat_copy(void) {   // outside a render pass (pass_dump)
+    g_ts_want = 0;
+    for (int i = 0; i < g_nts; i++) { texstat_t *t = &g_ts[i]; vkimg_t *im = t->im; if (t->b || t->present) continue;
+        VkBufferImageCopy r[16]; VkDeviceSize n = 0; uint32_t nl = im->levels < 16 ? im->levels : 16;
+        for (uint32_t l = 0; l < nl; l++) { uint32_t w = im->w >> l ? im->w >> l : 1, h = im->h >> l ? im->h >> l : 1, d = im->d >> l ? im->d >> l : 1;
+            t->off[l] = n; r[l] = (VkBufferImageCopy){n, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1}, {0, 0, 0}, {w, h, d}};
+            n += (VkDeviceSize)((w + t->bw - 1) / t->bw) * ((h + t->bh - 1) / t->bh) * t->bpb * d; }
+        VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, n, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE};
+        VKCHK(vkCreateBuffer(V.dev, &bi, NULL, &t->b)); VkMemoryRequirements rq; vkGetBufferMemoryRequirements(V.dev, t->b, &rq);
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, rq.size, vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0)};
+        void *mp; VKCHK(vkAllocateMemory(V.dev, &ai, NULL, &t->m)); VKCHK(vkBindBufferMemory(V.dev, t->b, t->m, 0)); VKCHK(vkMapMemory(V.dev, t->m, 0, VK_WHOLE_SIZE, 0, &mp)); t->p = mp;
+        VkCommandBuffer cb = vk_cmd(); vk_img_barrier_all(cb);
+        vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, t->b, nl, r); vk_img_barrier_all(cb);
+        t->present = g_tex_frame + 1; }
+}
+static void texstat_poll(void) {   // every present: the log, 8 presents after the copy (its submission long done)
+    for (int i = 0; i < g_nts; i++) { texstat_t *t = &g_ts[i]; vkimg_t *im = t->im; if (!t->b || g_tex_frame + 1 < t->present + 8) continue;
+        VKLOG("texture stat: id %d, %ux%ux%u VkFormat %d, %u levels, blocks of %u bytes", t->tid, im->w, im->h, im->d, im->fmt, im->levels, t->bpb);
+        for (uint32_t l = 0; l < im->levels && l < 16; l++) { uint32_t w = im->w >> l ? im->w >> l : 1, h = im->h >> l ? im->h >> l : 1, d = im->d >> l ? im->d >> l : 1;
+            size_t nb = (size_t)((w + t->bw - 1) / t->bw) * ((h + t->bh - 1) / t->bh), sz = nb * t->bpb;
+            for (uint32_t z = 0; z < d; z++) { const uint8_t *q = t->p + t->off[l] + z * sz; size_t nz = 0; uint8_t lo0 = 255, hi0 = 0, lo1 = 255, hi1 = 0; uint64_t hsh = 1469598103934665603ull;
+                for (size_t k = 0; k < sz; k++) { nz += q[k] != 0; hsh = (hsh ^ q[k]) * 1099511628211ull; }
+                for (size_t k = 0; k < nb; k++) { uint8_t a = q[k * t->bpb], b = q[k * t->bpb + 1]; if (a < lo0) lo0 = a; if (a > hi0) hi0 = a; if (b < lo1) lo1 = b; if (b > hi1) hi1 = b; }
+                VKLOG("texture stat:   level %u slice %2u: %zu blocks, %zu of %zu bytes not zero, first byte %u..%u, second %u..%u, hash %016llx", l, z, nb, nz, sz, lo0, hi0, lo1, hi1, (unsigned long long)hsh); } }
+        vkDestroyBuffer(V.dev, t->b, NULL); vkFreeMemory(V.dev, t->m, NULL); t->b = VK_NULL_HANDLE; t->present = ~0ull >> 1; }
+}
 static void pass_dump_depth(void);
 static void texdump_flush(void);
 static void pass_dump(void) {
+    if (g_ts_want) texstat_copy();
     texdump_flush();
     if (g_pd_state != 1) return;   // no dump armed: nothing below does anything then, and its three getenv calls at every pass's end were about 1% of the replay thread
     if (g_pd_state == 1 && g_sub_pass - 1 < g_pd_skip) return;   // (a submission with fewer passes dumps nothing, and the next one is tried)
@@ -470,6 +508,7 @@ static inline float half2f(uint16_t h) { uint32_t s = (uint32_t)(h >> 15) << 31,
     if (!e) { if (!m) f = s; else { e = 1; while (!(m & 1024)) { m <<= 1; e--; } m &= 1023; f = s | ((e + 112) << 23) | (m << 13); } } else if (e == 31) f = s | 0x7f800000 | (m << 13); else f = s | ((e + 112) << 23) | (m << 13);
     float r; memcpy(&r, &f, 4); return r; }
 void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every present: start on the switch, write once the GPU finished
+    if (g_nts) texstat_poll();
     const char *e = getenv("DM_VK_PASSDUMP");
     if (g_pd_state == 0 && e && atoi(e) > 1) { char n[16]; snprintf(n, sizeof n, "%d", atoi(e) - 1); setenv("DM_VK_PASSDUMP", n, 1); return; }   // =N: the frame after N - 1 more presents
     if (g_pd_state == 0 && e && atoi(e)) { const char *sk = getenv("DM_VK_PASSDUMP_SKIP"); g_pd_skip = sk && !strchr(sk, 'x') ? atoi(sk) : 0;
@@ -618,7 +657,8 @@ static int begin_pass(void) {
         // reflection cubemaps on the GPU) is that view's size in blocks: with the texel size the render area was 16 times the attachment, which Vulkan does not allow (the render area must lie within every attachment view)
         { const vkfmt_t *tf = vk_fmt(S.rt_col[i].d.format), *vf = S.rt_has_cview[i] && S.rt_cview[i].set_format ? vk_fmt(S.rt_cview[i].format) : tf;
           if (tf && vf && tf->compressed && !tf->dec && !vf->compressed && tf->bw && tf->bh) { iw = (iw + tf->bw - 1) / tf->bw; ih = (ih + tf->bh - 1) / tf->bh;
-              static int said; if (!said++) VKLOG("colour target: block-compressed format %#x drawn through view format %#x: pass in blocks, %ux%u", S.rt_col[i].d.format, S.rt_cview[i].format, iw, ih); } }
+              static int said; if (said++ < 100) VKLOG("colour target: block-compressed format %#x drawn through view format %#x: pass in blocks, %ux%u (image %ux%ux%u, level %u, view layers %u+%u%s, %u in the Vulkan view; present %llu)", S.rt_col[i].d.format, S.rt_cview[i].format, iw, ih,
+                                              im->w, im->h, im->d, lv, S.rt_cview[i].set_layers ? S.rt_cview[i].min_layer : 0, S.rt_cview[i].set_layers ? S.rt_cview[i].nlayers : 0, S.rt_cview[i].set_layers ? "" : " (not set)", vk_view_layers, (unsigned long long)g_tex_frame); } }
         if (iw < w) w = iw; if (ih < h) h = ih; samples = im->samples; have = 1;
         ca[i].imageView = v; S.cfmt[i] = vk_view_fmt; ncol = i + 1; P_att[i].im = im;   // (the view's format: a render pass's attachment and its pipelines take it)
         P_att[i].fmt = vk_view_fmt; P_att[i].layers = vk_view_layers ? vk_view_layers : 1; P_att[i].w = iw; P_att[i].h = ih;
@@ -1222,6 +1262,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
         if (logfs) nlogfs++;
         if (g_tracing || logfs) VKLOG("  %stexture binding %d handle %#llx id %d: %ux%u nvn format %#x target %d serial %llu pool %p+%#llx size %#llx → image %p (%ux%u fmt %d layers %u levels %u, gpu-written %d) view %p", logfs ? "logfs " : "", b->binding, (unsigned long long)h, tid, t->d.width, t->d.height, t->d.format, t->d.target,
                              (unsigned long long)t->serial, (const void *)t->pool, (unsigned long long)t->off, (unsigned long long)t->L.size, (void *)im, im ? im->w : 0, im ? im->h : 0, im ? im->fmt : 0, im ? im->layers : 0, im ? im->levels : 0, im ? (int)im->gpu_w : -1, (void *)ii->imageView);
+        if (logfs && im) texstat_note(im, tid);   // (a block-compressed image the GPU wrote: what it holds, once)
         if (im) im->last_use = mtl_last_fence() + 1;
         if (ii->imageView) num = view_num(t, v);
         if (ii->imageView) { g_tvc[ck].epoch = g_set_epoch; g_tvc[ck].gen = g_tex_gen; g_tvc[ck].tid = tid; g_tvc[ck].dim = b->dim; g_tvc[ck].arr = b->flags & 1; g_tvc[ck].v = ii->imageView; g_tvc[ck].im = im; g_tvc[ck].num = num; g_tvc[ck].sc = sc; }

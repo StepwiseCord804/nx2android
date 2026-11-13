@@ -73,6 +73,7 @@ static vkimg_t *vk_tex_by_id(int tid, const view_t **v, const tex_t **t) {
     (void)tid; ++lookup_calls; *t=&texture; *v=has_subview?&subview:NULL; return &image;
 }
 static uint64_t mtl_last_fence(void) { return 4; }
+static void texstat_note(vkimg_t *im, int tid) { (void)im; (void)tid; }
 static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t h, int n) {
     (void)st; (void)b; (void)h; (void)n; return (VkSampler)(uintptr_t)99;
 }
