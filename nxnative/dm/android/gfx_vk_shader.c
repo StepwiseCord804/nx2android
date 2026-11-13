@@ -549,6 +549,94 @@ static uint32_t *spv_a2c_dither(const uint32_t *w, uint32_t nw, uint32_t *onw) {
         memcpy(&o[no], &w[i], n * 4); no += n; i += n; }
     o[3] = c.bound; *onw = no; free(c.nt); return o;
 }
+// DM_VK_SPV_KILLS=<fragment shader key> (live, gfx_vk_exec.c x_read): what each discard of that shader depends on. For every conditional branch into a block that
+// ends in OpKill, the instructions its condition is computed from, in the module's order, a line each: variables with their binding, location or built-in,
+// constants with their value, loads, texture reads and arithmetic by name. A local variable brings in every value stored to it. For a draw that vanishes where
+// DM_VK_X_FLAT_VS shows its shape (Breath of the Wild's Link in a teleport): which uniform, texture or input the shader discards on
+static const char *spv_opname(uint32_t op) {
+    static const struct { uint16_t op; const char *n; } T[] = {{12, "ExtInst"}, {57, "FunctionCall"}, {61, "Load"}, {65, "AccessChain"}, {66, "AccessChain"}, {77, "VectorExtractDynamic"}, {79, "VectorShuffle"},
+        {80, "CompositeConstruct"}, {81, "CompositeExtract"}, {82, "CompositeInsert"}, {83, "CopyObject"}, {86, "SampledImage"}, {87, "ImageSampleImplicitLod"}, {88, "ImageSampleExplicitLod"},
+        {89, "ImageSampleDrefImplicitLod"}, {90, "ImageSampleDrefExplicitLod"}, {91, "ImageSampleProjImplicitLod"}, {92, "ImageSampleProjExplicitLod"}, {95, "ImageFetch"}, {96, "ImageGather"}, {98, "ImageRead"},
+        {100, "Image"}, {104, "ImageQuerySize"}, {109, "ConvertFToU"}, {110, "ConvertFToS"}, {111, "ConvertSToF"}, {112, "ConvertUToF"}, {124, "Bitcast"}, {126, "SNegate"}, {127, "FNegate"}, {128, "IAdd"},
+        {129, "FAdd"}, {130, "ISub"}, {131, "FSub"}, {132, "IMul"}, {133, "FMul"}, {134, "UDiv"}, {135, "SDiv"}, {136, "FDiv"}, {137, "UMod"}, {139, "SMod"}, {141, "FMod"}, {142, "VectorTimesScalar"},
+        {145, "MatrixTimesVector"}, {148, "Dot"}, {154, "Any"}, {155, "All"}, {156, "IsNan"}, {157, "IsInf"}, {164, "LogicalEqual"}, {165, "LogicalNotEqual"}, {166, "LogicalOr"}, {167, "LogicalAnd"},
+        {168, "LogicalNot"}, {169, "Select"}, {170, "IEqual"}, {171, "INotEqual"}, {172, "UGreaterThan"}, {173, "SGreaterThan"}, {174, "UGreaterThanEqual"}, {175, "SGreaterThanEqual"}, {176, "ULessThan"},
+        {177, "SLessThan"}, {178, "ULessThanEqual"}, {179, "SLessThanEqual"}, {180, "FOrdEqual"}, {181, "FUnordEqual"}, {182, "FOrdNotEqual"}, {183, "FUnordNotEqual"}, {184, "FOrdLessThan"},
+        {185, "FUnordLessThan"}, {186, "FOrdGreaterThan"}, {187, "FUnordGreaterThan"}, {188, "FOrdLessThanEqual"}, {189, "FUnordLessThanEqual"}, {190, "FOrdGreaterThanEqual"}, {191, "FUnordGreaterThanEqual"},
+        {194, "ShiftRightLogical"}, {195, "ShiftRightArithmetic"}, {196, "ShiftLeftLogical"}, {197, "BitwiseOr"}, {198, "BitwiseXor"}, {199, "BitwiseAnd"}, {200, "Not"}, {207, "DPdx"}, {208, "DPdy"},
+        {245, "Phi"}};
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) if (T[i].op == op) return T[i].n;
+    return NULL;
+}
+// which operands of an instruction (from word a, n of them) are ids: bit i set = operand i is a literal
+static uint64_t spv_literals(uint32_t op, uint32_t n) {
+    uint64_t all = n >= 64 ? ~0ull : (1ull << n) - 1;
+    if (op == 81) return all & ~1ull;                    // CompositeExtract: the composite, then indices
+    if (op == 82) return all & ~3ull;                    // CompositeInsert: object, composite, then indices
+    if (op == 79) return all & ~3ull;                    // VectorShuffle: two vectors, then components
+    if (op == 12) return 3;                              // ExtInst: the set and the instruction number
+    if (op == 61) return all & ~1ull;                    // Load: the pointer (then memory access)
+    if (op == 245) return all & 0xaaaaaaaaaaaaaaaaull;   // Phi: value, parent block
+    if (op >= 87 && op <= 98) { uint32_t ids = op == 89 || op == 90 || op == 93 || op == 94 ? 3 : 2; return n > ids ? 1ull << ids : 0; }   // image reads: image, coordinate (Dref), the operand mask, then ids
+    return 0;
+}
+void vk_spv_kills(const uint32_t *w, uint32_t nw, uint64_t key) {
+    uint32_t bound = w[3], fn = nw; if (bound > 1u << 20) return;
+    uint32_t *def = calloc(bound, 4), *deco = calloc(bound, 4 * 4); uint8_t *in = calloc(bound, 1), *has = calloc(bound, 1);   // deco: binding, set, location, built-in (+1 each)
+    #define NORES(o) ((o) == 62 || (o) == 63 || ((o) >= 246 && (o) <= 255 && (o) != 248) || (o) == 56 || (o) == 8 || (o) == 317 || (o) == 4416 || (o) == 99 || ((o) >= 71 && (o) <= 76) || (o) <= 6 || ((o) >= 14 && (o) <= 17))
+    #define RES1(o) ((o) == 248 || ((o) >= 19 && (o) <= 33) || (o) == 11 || (o) == 7)
+    for (uint32_t i = 5; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n || i + n > nw) goto out;
+        if (op == 54 && fn == nw) fn = i;
+        if (op == 71 && n == 4 && w[i + 1] < bound) { uint32_t d = w[i + 2], k = d == 33 ? 0 : d == 34 ? 1 : d == 30 ? 2 : d == 11 ? 3 : 4; if (k < 4) deco[4 * w[i + 1] + k] = w[i + 3] + 1; }
+        if (!NORES(op)) { uint32_t r = RES1(op) ? (n > 1 ? w[i + 1] : 0) : (n > 2 ? w[i + 2] : 0); if (r && r < bound) def[r] = i; }
+        i += n; }
+    int nk = 0;
+    for (uint32_t i = fn; i < nw && nk < 8;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == 250 && n >= 4) for (int side = 0; side < 2; side++) {   // BranchConditional: does a target block end in OpKill / OpTerminateInvocation?
+            uint32_t lab = w[i + 2 + side]; if (lab >= bound || !def[lab]) continue;
+            uint32_t j = def[lab] + (w[def[lab]] >> 16), kills = 0; for (int steps = 0; j < nw && steps < 4; steps++) { uint32_t o = w[j] & 0xffff; if (o == 252 || o == 4416) { kills = 1; break; } if (o == 248 || (o >= 249 && o <= 255)) break; j += w[j] >> 16; }
+            if (!kills) continue;
+            nk++; VKLOG("spv %016llx: discard %d when %%%u is %s", (unsigned long long)key, nk, w[i + 1], side ? "false" : "true");
+            // the slice: every id the condition is computed from
+            memset(in, 0, bound); uint32_t cap = bound * 8, *stack = malloc((size_t)cap * 4), sp = 0, nin = 0; stack[sp++] = w[i + 1];
+            while (sp) { uint32_t id = stack[--sp]; if (id >= bound || in[id] || !def[id]) continue; in[id] = 1; nin++;
+                uint32_t d = def[id], dn = w[d] >> 16, dop = w[d] & 0xffff;
+                if (RES1(dop) || dop == 43 || dop == 41 || dop == 42 || dop == 46 || dop == 1 || dop == 54 || dop == 55) continue;   // types, scalar constants, functions: nothing further
+                if (dop == 59) {   // a variable: a local or private one brings in what is stored to it (through any access chain)
+                    if (w[d + 3] == 7 || w[d + 3] == 6) for (uint32_t q = fn; q < nw;) { uint32_t qn = w[q] >> 16; if ((w[q] & 0xffff) == 62 && qn >= 3) { uint32_t ptr = w[q + 1];
+                            for (int hops = 0; hops < 8 && ptr < bound && def[ptr] && ((w[def[ptr]] & 0xffff) == 65 || (w[def[ptr]] & 0xffff) == 66); hops++) ptr = w[def[ptr] + 3];
+                            if (ptr == id && sp + 2 < cap) { has[id] = 1; stack[sp++] = w[q + 2]; } }
+                        q += qn; }
+                    continue; }
+                uint64_t lit = spv_literals(dop, dn - 3);
+                for (uint32_t a = 0; a + 3 < dn && sp + 1 < cap; a++) if (a >= 64 || !(lit >> a & 1)) stack[sp++] = w[d + 3 + a]; }
+            free(stack);
+            int lines = 0;
+            for (uint32_t d = 5; d < nw && lines < 400;) { uint32_t dn = w[d] >> 16, dop = w[d] & 0xffff, r = NORES(dop) ? 0 : RES1(dop) ? w[d + 1] : (dn > 2 ? w[d + 2] : 0);
+                if (r && r < bound && in[r] && def[r] == d && !RES1(dop) && dop != 54 && dop != 55) { char t[512]; int o = 0; lines++;
+                    if (dop == 59) { static const char *SC[] = {"uniform constant", "input", "uniform", "output", "", "", "private", "local"}; uint32_t c = w[d + 3];
+                        o += snprintf(t, sizeof t, "variable (%s)", c < 8 ? SC[c] : "other");
+                        if (deco[4 * r + 0]) o += snprintf(t + o, sizeof t - (size_t)o, " binding %u", deco[4 * r + 0] - 1);
+                        if (deco[4 * r + 2]) o += snprintf(t + o, sizeof t - (size_t)o, " location %u", deco[4 * r + 2] - 1);
+                        if (deco[4 * r + 3]) o += snprintf(t + o, sizeof t - (size_t)o, " built-in %u%s", deco[4 * r + 3] - 1, deco[4 * r + 3] - 1 == 15 ? " (FragCoord)" : deco[4 * r + 3] - 1 == 17 ? " (FrontFacing)" : "");
+                        if (has[r]) o += snprintf(t + o, sizeof t - (size_t)o, ", stored to by the lines above and below"); }
+                    else if (dop == 43) { uint32_t ty = w[d + 1], isf = ty < bound && def[ty] && (w[def[ty]] & 0xffff) == 22; float f; memcpy(&f, &w[d + 3], 4);
+                        if (isf) o += snprintf(t, sizeof t, "constant %g", f); else o += snprintf(t, sizeof t, "constant %u", w[d + 3]); }
+                    else if (dop == 41 || dop == 42) o += snprintf(t, sizeof t, "constant %s", dop == 41 ? "true" : "false");
+                    else { const char *nm = spv_opname(dop); uint64_t lit = spv_literals(dop, dn - 3);
+                        if (nm) o += snprintf(t, sizeof t, "%s", nm); else o += snprintf(t, sizeof t, "op%u", dop);
+                        for (uint32_t a = 0; a + 3 < dn && o < (int)sizeof t - 16; a++) o += snprintf(t + o, sizeof t - (size_t)o, a < 64 && (lit >> a & 1) ? " %u" : " %%%u", w[d + 3 + a]); }
+                    VKLOG("spv   %%%u = %s", r, t); }
+                d += dn; }
+            if (lines == 400) VKLOG("spv   (more lines left out: %u ids in all)", nin);
+        }
+        i += n; }
+    if (!nk) VKLOG("spv %016llx: no discard (no conditional branch into a block that ends in OpKill)", (unsigned long long)key);
+out:
+    #undef NORES
+    #undef RES1
+    free(def); free(deco); free(in); free(has);
+}
 // DM_VK_SPV_DIR=<dir> with DM_VK_SPV_ALT=1 (live, debugging): pipelines made while it is on use <dir>/<key>.spv in place of the bundle's code where the file
 // exists (same bindings), so two compilations of a shader can be compared in one run: the translator's module through spirv-opt, its GLSL through glslc...
 static VkShaderModule alt_module(vkshader_t *s) {

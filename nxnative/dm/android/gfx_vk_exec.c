@@ -157,6 +157,9 @@ void vk_watch(const vkimg_t *im, const char *what) {
 static void x_read(void) { const char *c = getenv("DM_VK_CB_DRAWS"); g_x_cbdraws = c ? atoi(c) : 128; g_sub_pass = 0;
     const char *fy = getenv("DM_VK_FLIPY"); g_flipy = !(fy && !atoi(fy));   // on unless DM_VK_FLIPY=0
     if (g_x_listpasses) { g_x_listpasses = 0; setenv("DM_VK_TRACE_PASS", "-1", 1); }
+    { const char *sk = getenv("DM_VK_SPV_KILLS"); static uint64_t last; uint64_t key = sk ? strtoull(sk, NULL, 16) : 0;   // what a fragment shader's discards depend on (gfx_vk_shader.c vk_spv_kills), once a key
+      if (key != last) { last = key; vkshader_t *s = key ? vk_shader(key, 1) : NULL; void vk_spv_kills(const uint32_t *w, uint32_t nw, uint64_t key);
+          if (s && s->spv) { VKLOG("spv %016llx: %u words, writes its depth %d", (unsigned long long)key, s->nspv, s->depth_repl); vk_spv_kills(s->spv, s->nspv, key); } else if (key) VKLOG("spv %016llx: no such fragment shader, or its code is not kept", (unsigned long long)key); } }
     { const char *ld = getenv("DM_VK_LIST_DRAWS");   // two frames taken a moment apart show what the game draws differently (an object it fades out), by shader key
       if (g_x_listdraws) { g_x_listdraws = 0; setenv("DM_VK_LIST_DRAWS", "0", 1); VKLOG("--- draw list: end"); }
       else if (ld && atoi(ld)) { g_x_listdraws = 1; VKLOG("--- draw list: the submission at present %llu", (unsigned long long)g_tex_frame); } }
