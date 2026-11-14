@@ -6,7 +6,7 @@ Left out because they have an official Android release: Unpacking (ported here a
 
 "Profile here": `nxnative/dm/games/<title ID>/` has the game's profile from nxnative. "Upstream profile": only seedds/nxnative has one, to read as a reference or starter, not to pull. "60 fps with X" is upstream's note: they run that update at 60 fps (30 on the Switch).
 
-**52 / 106 ported**
+**54 / 108 ported**
 
 - [x] 13 Sentinels: Aegis Rim · `01003FC01670C000`
 - [ ] Ace Attorney Investigations Collection · `010005501E68C000` · profile here
@@ -25,6 +25,7 @@ Left out because they have an official Android release: Unpacking (ported here a
 - [x] Blasphemous 2 · `010040801A4C8000`
 - [ ] Brain Memory Training Academy · `0100F5D01DA3A000` · profile here
 - [x] Captain Toad: Treasure Tracker · `01009BF0072D4000`
+- [x] Cardfight!! Vanguard Dear Days 2 · `0100B6F01DAF6000`
 - [x] Castlevania: Belmont's Curse · `0100BA4026E94000`
 - [ ] Catherine: Full Body · `0100BF00112C0000` · profile here
 - [x] Celeste · `01002B30028F6000`
@@ -50,13 +51,14 @@ Left out because they have an official Android release: Unpacking (ported here a
 - [x] Hollow Knight: Silksong · `010013C00E930000`
 - [ ] Hyrule Warriors: Age of Calamity · `01002B00111A2000` · profile here · 60 fps with 1.3.0
 - [x] Kirby and the Forgotten Land · `01004D300C5AE000`
+- [x] Kirby's Return to Dream Land Deluxe · `01006B601380E000` · needs the console's firmware for its fonts
 - [x] Lonely Mountains: Downhill · `0100A0C00E0DE000` · Retroid Pocket 6 / PurpleVK; brief visual glitches
 - [ ] Luigi's Mansion 3 · `0100DCA0064A6000` · profile here · 60 fps with 1.4.0
 - [ ] Mario + Rabbids Kingdom Battle · `010067300059A000` · upstream profile
 - [ ] Mario + Rabbids Sparks of Hope · `0100317013770000` · upstream profile
 - [ ] Mario Kart 8 Deluxe · `0100152000022000` · profile here · no Mii heads
 - [x] Mario vs. Donkey Kong · `0100B99019412000`
-- [x] Mega Man Battle Network Legacy Collection Vol. 1 · `010038E016264000` · work in progress: tested to Battle Network 1's opening
+- [x] Mega Man Battle Network Legacy Collection Vol. 1 · `010038E016264000`
 - [x] Mega Man Battle Network Legacy Collection Vol. 2 · `0100734016266000` · work in progress: tested to Battle Network 4's opening
 - [x] Metroid Dread · `010093801237C000`
 - [ ] Monster Hunter Rise · `0100B04011742000` · profile here · 60 fps with 16.0.2
