@@ -10,6 +10,10 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import csrc  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,9 +27,9 @@ class AndroidMotion(unittest.TestCase):
             raise unittest.SkipTest('a C compiler is required')
         front = (ROOT / 'nxnative/dm/android/front_android.c').read_text()
         hid = (ROOT / 'nxnative/dm/host/hle_hid.c').read_text()
-        shake = hid[hid.index('#define SHAKE_HZ'):hid.index('void dm_input_set(')]
-        motion = hid[hid.index('typedef struct { int64_t delta_ns'):hid.index('// SixAxisSensorHandle:')]
-        sensor = front[front.index('static void motion_feed('):front.index('static void *input_thread(')]
+        shake = csrc.between(hid, '#define SHAKE_HZ', 'void dm_input_set(')
+        motion = csrc.between(hid, 'typedef struct { int64_t delta_ns', '// SixAxisSensorHandle:')
+        sensor = csrc.between(front, 'static void motion_feed(', 'static void *input_thread(')
         harness = r'''
 #include <assert.h>
 #include <math.h>
@@ -77,7 +81,8 @@ static ssize_t ASensorEventQueue_getEvents(ASensorEventQueue *q, ASensorEvent *o
 static void rotation_start(void) {}
 static void rotation_poll(int64_t now) { (void)now; }
 static void shake_sensor(int on) { (void)on; }
-static void pad_publish(void) { atomic_store(&g_pad_btn[0], g_shake_btn); shake_note(); }
+static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // the per-player state's lock (each controller a player of its own)
+static void pad_publish(int p) { (void)p; atomic_store(&g_pad_btn[0], g_shake_btn); shake_note(); }
 ''' + sensor + r'''
 static void event(int type, uint64_t time, float x, float y, float z) {
     pending = (ASensorEvent){.type = type, .timestamp = time, .vector = {x, y, z}};
