@@ -39,6 +39,12 @@ python -m porter doctor
 python -m porter port "D:\Games\NEO" -k "D:\keys\prod.keys" --install
 ```
 
+Add `--jobs=1` to rewrite the game's modules one at a time. A positive `--jobs N`
+also controls the parallel shader and host build work; the default is the CPU
+count (eight if unavailable). Serial rewriting reduces concurrent work but does
+not cap a single module's memory use. Changing `--jobs` preserves reusable
+rewrite outputs, so a completed rewrite need not run again for a different limit.
+
 The APK (`NeoTheWorldEndsWithYou.apk`) and the data pack (`NeoTheWorldEndsWithYou-data/`) appear in the game folder (`-o` picks another). `python -m porter install <App>-data` installs a port made earlier; with `--romfs-at <folder on the device>` the app reads the game's RomFS from a folder already there (an emulator's dump of the same version) instead of a copy in its files folder ([ARCHITECTURE.md](ARCHITECTURE.md#the-port), A RomFS already on the device). The first port takes a while (extraction, rewriting the game's code, translating its shaders); later ones reuse what has not changed. `python -m porter -h` lists the commands.
 
 ### Saves
@@ -86,7 +92,7 @@ It refuses when the game's code on the device was rewritten with other rewriter 
 
 ## Adding a game
 
-Each game is a profile in `nxnative/dm/games/<title ID>/` with an `android.tsv`: [ARCHITECTURE.md](ARCHITECTURE.md#adding-a-game). A finished port updates, in the profile's commit, the games table in the [README](../README.md#games) (the profile's `readme_image`, `readme_tag`, `readme_note` rows: a gameplay frame captured on the device in `docs/images/` and the tag of the nx2android version it was tested on) and [PORT_CHECKLIST.md](PORT_CHECKLIST.md); `python docs/gen_tables.py` writes the table, the checklist's ticks and its count from the profiles, so pull requests do not edit the same lines. The porter's options: a field of `porter/pipeline.py` `Options` and a `porter port` argument of the same name (`Options.from_args`).
+Each game is a profile in `nxnative/dm/games/<title ID>/` with an `android.tsv`: [ARCHITECTURE.md](ARCHITECTURE.md#adding-a-game). A finished port adds, in the profile's commit, the game's own page `nxnative/dm/games/<title ID>/README.md` ([GAME_README_TEMPLATE.md](GAME_README_TEMPLATE.md): game version, frame rate, tested devices, options, quirks), its place in the [README](../README.md#games)'s games list (the profile's `readme_image` and `readme_tag` rows: a gameplay frame captured on the device in `docs/images/` and the tag of the nx2android version it was tested on) and [PORT_CHECKLIST.md](PORT_CHECKLIST.md); `python docs/gen_tables.py` writes the list, the page's facts block, the checklist's ticks and its count from the profiles (and starts the page from the template), so pull requests do not edit the same lines. The porter's options: a field of `porter/pipeline.py` `Options` and a `porter port` argument of the same name (`Options.from_args`).
 
 ## Releases and version numbers
 
