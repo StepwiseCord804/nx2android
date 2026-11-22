@@ -15,7 +15,7 @@ import csrc  # noqa: E402
 class PerfNeed(unittest.TestCase):
     def test_turbo_and_pinning_follow_need(self):
         src = csrc.read('nxnative/dm/android/perf_android.c')
-        need_off = csrc.between(src, '#define NEED_OFF_NS', '\n', 'perf_android.c')
+        need_off = csrc.between(src, '#define NEED_OFF_NS', 'static int frame_held(void);', 'perf_android.c')
         turbo = csrc.function(src, 'static int turbo_need(int on) {', 'perf_android.c')
         pin_defs = csrc.between(src, '#define PIN_ON_NS', 'static int64_t g_replay_mean;', 'perf_android.c')
         replay = csrc.function(src, 'static void replay_need(void) {', 'perf_android.c')
@@ -61,6 +61,15 @@ int main(void) {
     /* any late frame keeps it on, held or not */
     held_n = 0; late_n = 1; assert(turbo_need(1) == 1);
     late_n = 0; assert(turbo_need(1) == 0);
+    /* the limit was lowered by a fifth at the quick return above (11.7 -> 9.36 ms): 10 ms no longer turns it off */
+    held_n = 1; t_now = 260 * S; assert(turbo_need(0) == 1);   /* 60 s after the last off: no further lowering */
+    held_n = 0; g_gpu_mean = 10000000; t_now = 400 * S; assert(turbo_need(1) == 1);
+    g_gpu_mean = 9000000; assert(turbo_need(1) == 0);
+    /* back within 30 s: lowered again (7.49 ms), and never under 6 ms however often */
+    held_n = 1; t_now = 410 * S; assert(turbo_need(0) == 1);
+    held_n = 0; g_gpu_mean = 8000000; t_now = 1000 * S; assert(turbo_need(1) == 1);
+    for (int i = 0; i < 6; i++) { g_gpu_mean = 5900000; t_now += 400 * S; assert(turbo_need(1) == 0); held_n = 1; t_now += 1 * S; assert(turbo_need(0) == 1); held_n = 0; }
+    g_gpu_mean = 6100000; t_now += 400 * S; assert(turbo_need(1) == 1);
 
     /* pinning: looked at every 60 calls; nothing while the replay time is not known */
     t_now = 300 * S; calls(60); assert(npins == 0);

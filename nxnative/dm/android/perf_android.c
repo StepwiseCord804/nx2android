@@ -70,18 +70,21 @@ static int turbo_auto(int on) {
 // the governor's own clocks), after the same hold as auto. auto waits for late frames, and a game the frame step holds at 30 shows almost none: Breath of
 // the Wild on a Galaxy S25 Ultra sat at 30 for a whole run with the GPU at about 21 ms a frame for 3,300 draws (12-13 ms with the turbo), the governor
 // lowering the clock until the work filled the longer frame. The turbo held all the time (DM_GPU_TURBO=1) costs heat where it is not needed: on an AYN
-// Odin 3 (Adreno 830, fan) the same game took 7-11 ms of GPU a frame at 1080p with it, and the GPU's package ran hot beside the CPU
+// Odin 3 (Adreno 830, fan) the same game took 7-11 ms of GPU a frame at 1080p with it, and the GPU's package ran hot beside the CPU.
+// A turbo that must come back within 30 s of going off also lowers the limit by a fifth (down to NEED_OFF_MIN_NS), besides doubling the hold: the governor
+// of the same S25 Ultra dropped the clock as soon as it was let go at 11.3 and 9.6 ms, and the frames went back to 30 within 1.3 s both times
 #define NEED_OFF_NS 11700000ll
+#define NEED_OFF_MIN_NS 6000000ll
 static int frame_held(void);   // (below dm_perf_frame: the adaptive rate's state)
 static int turbo_need(int on) {
-    static int64_t since, off_at, hold = 10000000000ll; int64_t now = perf_now(); int late = shown_late(), held = frame_held();
+    static int64_t since, off_at, hold = 10000000000ll, lim = NEED_OFF_NS; int64_t now = perf_now(); int late = shown_late(), held = frame_held();
     if (!on) {
         if (!held && late < 4) return 0;
-        if (off_at && now - off_at < 30000000000ll) hold = hold * 2 > 300000000000ll ? 300000000000ll : hold * 2;
-        since = now; LOG("[perf] DM_GPU_TURBO=need: on (%s, GPU %.1f ms; held at least %.0f s)", held ? "frames held below the target" : "frames late on screen", g_gpu_mean / 1e6, hold / 1e9);
+        if (off_at && now - off_at < 30000000000ll) { hold = hold * 2 > 300000000000ll ? 300000000000ll : hold * 2; lim = lim * 4 / 5 < NEED_OFF_MIN_NS ? NEED_OFF_MIN_NS : lim * 4 / 5; }
+        since = now; LOG("[perf] DM_GPU_TURBO=need: on (%s, GPU %.1f ms; held at least %.0f s, off under %.1f ms)", held ? "frames held below the target" : "frames late on screen", g_gpu_mean / 1e6, hold / 1e9, lim / 1e6);
         return 1;
     }
-    if (now - since < hold || held || late > 0 || g_gpu_mean <= 0 || g_gpu_mean >= NEED_OFF_NS) return 1;
+    if (now - since < hold || held || late > 0 || g_gpu_mean <= 0 || g_gpu_mean >= lim) return 1;
     off_at = now; LOG("[perf] DM_GPU_TURBO=need: off (at the target, GPU %.1f ms at the highest clock)", g_gpu_mean / 1e6); return 0;
 }
 // The KGSL property is device-wide and outlives the app, so the power control goes back to the governor when the app pauses or ends (front_android.c
